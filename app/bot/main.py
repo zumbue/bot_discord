@@ -163,7 +163,7 @@ async def lembrar(ctx, *, busca: str):
         await mensagem_espera.edit(content="Ocorreu um erro ao acessar o banco de memórias.")
 
 @bot.command(name="sincronizar")
-async def sincronizar(ctx, limite: int = 100):
+async def sincronizar(ctx, limite: int = 999999):
     await ctx.send(f"⏳ Iniciando a leitura das últimas {limite} mensagens...")
     salvas = 0
     ignoradas = 0
