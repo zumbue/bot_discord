@@ -4,8 +4,12 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from sqlalchemy import select, func, desc
 
+# Imports do banco de dados
 from app.db.database import init_db, AsyncSessionLocal
 from app.db.models import Usuario, Mensagem
+
+# Import da biblioteca de IA
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -16,16 +20,21 @@ intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ==========================================
+# 🧠 INICIALIZANDO O MOTOR DE IA
+# ==========================================
+print("🧠 Baixando/Carregando o modelo de Inteligência Artificial...")
+print("(Isso pode demorar um pouquinho na primeira vez)")
+# O modelo 'all-MiniLM-L6-v2' gera exatamente 384 dimensões (como definimos no banco)
+ai_model = SentenceTransformer('all-MiniLM-L6-v2')
+
 @bot.event
 async def on_ready():
     print("=======================================")
     print(f"🤖 Sistema inicializado com sucesso!")
     print(f"👤 Logado como: {bot.user}")
-    print(f"🆔 ID do Bot: {bot.user.id}")
-    
-    print("⚙️  Conectando ao Banco de Dados...")
+    print("⚙️  Conectando ao Banco de Dados e verificando pgvector...")
     await init_db()
-    
     print("=======================================")
     print("Aguardando eventos do servidor...")
 
@@ -39,6 +48,12 @@ async def on_message(message):
     texto = message.content
 
     print(f"[{canal_nome}] {usuario_nome} disse: {texto}")
+
+    # ==========================================
+    # 🪄 A MÁGICA DA MEMÓRIA SEMÂNTICA
+    # ==========================================
+    # Transforma o texto em um vetor matemático de 384 posições
+    vetor_matematico = ai_model.encode(texto).tolist()
 
     async with AsyncSessionLocal() as session:
         try:
@@ -56,15 +71,17 @@ async def on_message(message):
                 await session.commit()
                 await session.refresh(usuario_db)
 
+            # Salva a mensagem JUNTO com a interpretação vetorial
             nova_mensagem = Mensagem(
                 message_id=message.id,
                 user_id=usuario_db.id,
                 channel_id=message.channel.id,
-                content=message.content
+                content=message.content,
+                embedding=vetor_matematico # <--- Guardando a coordenada matemática
             )
             session.add(nova_mensagem)
             await session.commit()
-            print("✅ Mensagem salva no banco com sucesso!")
+            print("✅ Texto e Vetor (Memória IA) salvos com sucesso!")
             
         except Exception as e:
             print(f"❌ Erro ao salvar no banco: {e}")
@@ -74,16 +91,9 @@ async def on_message(message):
 
 @bot.command(name="status")
 async def status(ctx, membro: discord.Member = None):
-    # Se você não marcar ninguém (ex: digitar apenas !status), ele pega os seus dados
     alvo = membro or ctx.author
-
-    # Abre a conexão com o banco
     async with AsyncSessionLocal() as session:
         try:
-            # ==========================================
-            # 1. DADOS DO USUÁRIO ALVO
-            # ==========================================
-            # Primeiro, achamos o ID interno do usuário no banco
             result_user = await session.execute(
                 select(Usuario).where(Usuario.discord_id == alvo.id)
             )
@@ -91,36 +101,27 @@ async def status(ctx, membro: discord.Member = None):
 
             total_mensagens = 0
             if usuario_db:
-                # Conta quantas mensagens tem o ID desse usuário
                 result_count = await session.execute(
                     select(func.count(Mensagem.id)).where(Mensagem.user_id == usuario_db.id)
                 )
-                total_mensagens = result_count.scalar() # scalar() extrai o número direto
+                total_mensagens = result_count.scalar()
 
-            # ==========================================
-            # 2. RANKING GERAL DO SERVIDOR (TOP 5)
-            # ==========================================
             result_ranking = await session.execute(
                 select(Usuario.username, func.count(Mensagem.id).label('total'))
-                .join(Mensagem) # Junta a tabela de usuários com a de mensagens
-                .group_by(Usuario.id) # Agrupa por pessoa
-                .order_by(desc('total')) # Ordena do maior para o menor
-                .limit(5) # Pega apenas os 5 primeiros
+                .join(Mensagem)
+                .group_by(Usuario.id)
+                .order_by(desc('total'))
+                .limit(5)
             )
-            ranking_db = result_ranking.all() # Retorna uma lista com (Nome, Total)
+            ranking_db = result_ranking.all()
 
-            # ==========================================
-            # 3. FORMATANDO A RESPOSTA NO DISCORD
-            # ==========================================
             resposta = f"📊 **Status de {alvo.display_name}**\n"
             resposta += f"Total de mensagens enviadas: **{total_mensagens}**\n\n"
             
             resposta += "🏆 **Ranking de Atividade (Top 5)**\n"
             for posicao, (nome, total) in enumerate(ranking_db, start=1):
-                # Formatação simples para mostrar a posição e o nome
                 resposta += f"{posicao}º - {nome}: {total} mensagens\n"
 
-            # O bot envia a mensagem de volta no mesmo canal onde o comando foi digitado
             await ctx.send(resposta)
 
         except Exception as e:
