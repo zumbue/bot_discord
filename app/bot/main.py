@@ -20,12 +20,10 @@ intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ==========================================
-# 🧠 INICIALIZANDO O MOTOR DE IA
-# ==========================================
+# INICIALIZANDO O MOTOR DE IA
 print("🧠 Baixando/Carregando o modelo de Inteligência Artificial...")
 print("(Isso pode demorar um pouquinho na primeira vez)")
-# O modelo 'all-MiniLM-L6-v2' gera exatamente 384 dimensões (como definimos no banco)
+# O modelo 'all-MiniLM-L6-v2' gera exatamente 384 dimensões
 ai_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 @bot.event
@@ -49,10 +47,7 @@ async def on_message(message):
 
     print(f"[{canal_nome}] {usuario_nome} disse: {texto}")
 
-    # ==========================================
-    # 🪄 A MÁGICA DA MEMÓRIA SEMÂNTICA
-    # ==========================================
-    # Transforma o texto em um vetor matemático de 384 posições
+    # MEMÓRIA SEMÂNTICA
     vetor_matematico = ai_model.encode(texto).tolist()
 
     async with AsyncSessionLocal() as session:
@@ -72,13 +67,14 @@ async def on_message(message):
                 await session.refresh(usuario_db)
 
             # Salva a mensagem JUNTO com a interpretação vetorial
-            nova_mensagem = Mensagem(
-                message_id=message.id,
-                user_id=usuario_db.id,
-                channel_id=message.channel.id,
-                content=message.content,
-                embedding=vetor_matematico # <--- Guardando a coordenada matemática
-            )
+            nova_msg = Mensagem(
+                    message_id=msg.id,
+                    user_id=usuario_db.id,
+                    channel_id=msg.channel.id,
+                    content=msg.content,
+                    embedding=vetor,
+                    timestamp=msg.created_at.replace(tzinfo=None) # <--- É essa parte que limpa o fuso
+                )
             session.add(nova_mensagem)
             await session.commit()
             print("✅ Texto e Vetor (Memória IA) salvos com sucesso!")
@@ -127,6 +123,98 @@ async def status(ctx, membro: discord.Member = None):
         except Exception as e:
             print(f"❌ Erro ao buscar status no banco: {e}")
             await ctx.send("Ocorreu um erro ao buscar os dados no banco.")
+
+@bot.command(name="lembrar")
+async def lembrar(ctx, *, busca: str):
+    # Avisa no chat que está pensando
+    mensagem_espera = await ctx.send("🧠 Vasculhando minhas memórias semânticas...")
+
+    try:
+        # 384 dimensões
+        vetor_busca = ai_model.encode(busca).tolist()
+
+        async with AsyncSessionLocal() as session:
+            # Busca as 3 mensagens com o menor "ângulo" de diferença
+            resultados = await session.execute(
+                select(Mensagem, Usuario.username)
+                .join(Usuario)
+                .order_by(Mensagem.embedding.cosine_distance(vetor_busca)) # Ordena pela similaridade
+                .limit(3) # Traz o Top 3
+            )
+            
+            mensagens_encontradas = resultados.all()
+
+            # 3. Formata a resposta
+            if not mensagens_encontradas:
+                await mensagem_espera.edit(content="Não encontrei nenhuma memória parecida com isso.")
+                return
+
+            resposta = f"🔍 **Resultados para:** '{busca}'\n\n"
+            
+            for msg, autor_nome in mensagens_encontradas:
+                data_formatada = msg.timestamp.strftime("%d/%m/%Y %H:%M")
+                resposta += f"👤 **{autor_nome}** ({data_formatada}): {msg.content}\n"
+
+            # Edita a mensagem de espera com os resultados finais
+            await mensagem_espera.edit(content=resposta)
+
+    except Exception as e:
+        print(f"❌ Erro na busca vetorial: {e}")
+        await mensagem_espera.edit(content="Ocorreu um erro ao acessar o banco de memórias.")
+
+@bot.command(name="sincronizar")
+async def sincronizar(ctx, limite: int = 100):
+    await ctx.send(f"⏳ Iniciando a leitura das últimas {limite} mensagens...")
+    salvas = 0
+    ignoradas = 0
+
+    async with AsyncSessionLocal() as session:
+        async for msg in ctx.channel.history(limit=limite):
+            if msg.author == bot.user or not msg.content.strip():
+                continue
+
+            try:
+                result = await session.execute(
+                    select(Mensagem).where(Mensagem.message_id == msg.id)
+                )
+                if result.scalars().first():
+                    ignoradas += 1
+                    continue
+                
+                res_user = await session.execute(
+                    select(Usuario).where(Usuario.discord_id == msg.author.id)
+                )
+                usuario_db = res_user.scalars().first()
+                
+                if not usuario_db:
+                    usuario_db = Usuario(discord_id=msg.author.id, username=msg.author.name)
+                    session.add(usuario_db)
+                    await session.commit()
+                    await session.refresh(usuario_db)
+                
+                vetor = ai_model.encode(msg.content).tolist()
+                
+                # TEMPO ISOLADO
+                data_limpa = msg.created_at.replace(tzinfo=None)
+
+                nova_msg = Mensagem(
+                    message_id=msg.id,
+                    user_id=usuario_db.id,
+                    channel_id=msg.channel.id,
+                    content=msg.content,
+                    embedding=vetor,
+                    timestamp=data_limpa
+                )
+                session.add(nova_msg)
+                await session.commit()
+                salvas += 1
+                print(f"📥 Processado: {msg.author.name} - {msg.content[:30]}...")
+
+            except Exception as e:
+                print(f"❌ Erro na msg {msg.id}: {e}")
+                await session.rollback()
+
+    await ctx.send(f"✅ Sincronização: **{salvas}** salvas, **{ignoradas}** ignoradas.")
 
 if __name__ == "__main__":
     token = os.getenv('DISCORD_TOKEN')
