@@ -38,17 +38,29 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
+    # 1. Ignora o próprio bot
     if message.author == bot.user:
         return
 
+    # 2. Ignora mensagens vazias (Gifs, figurinhas, anexos sem texto)
+    if not message.content or not message.content.strip():
+        await bot.process_commands(message)
+        return
+
+    # 3. Trava de segurança para DMs ou canais sem nome
+    canal_nome = getattr(message.channel, "name", "Mensagem Direta")
     usuario_nome = message.author.name
-    canal_nome = message.channel.name
     texto = message.content
 
-    print(f"[{canal_nome}] {usuario_nome} disse: {texto}")
+    print(f"Recebido de {usuario_nome}: {texto[:30]}...")
 
     # MEMÓRIA SEMÂNTICA
-    vetor_matematico = ai_model.encode(texto).tolist()
+    try:
+        vetor_matematico = ai_model.encode(texto).tolist()
+    except Exception as e:
+        print(f"❌ Erro ao passar texto na IA: {e}")
+        await bot.process_commands(message)
+        return
 
     async with AsyncSessionLocal() as session:
         try:
@@ -66,23 +78,24 @@ async def on_message(message):
                 await session.commit()
                 await session.refresh(usuario_db)
 
-            # Salva a mensagem JUNTO com a interpretação vetorial
             nova_msg = Mensagem(
-                    message_id=msg.id,
-                    user_id=usuario_db.id,
-                    channel_id=msg.channel.id,
-                    content=msg.content,
-                    embedding=vetor,
-                    timestamp=msg.created_at.replace(tzinfo=None) # <--- É essa parte que limpa o fuso
-                )
-            session.add(nova_mensagem)
+                message_id=message.id,
+                user_id=usuario_db.id,
+                channel_id=message.channel.id,
+                content=texto,
+                embedding=vetor_matematico,
+                timestamp=message.created_at.replace(tzinfo=None)
+            )
+            
+            session.add(nova_msg)
             await session.commit()
-            print("✅ Texto e Vetor (Memória IA) salvos com sucesso!")
+            print("✅ Nova mensagem salva com sucesso no banco!")
             
         except Exception as e:
-            print(f"❌ Erro ao salvar no banco: {e}")
+            print(f"❌ Erro crítico no banco de dados: {e}")
             await session.rollback()
 
+    # Processa os comandos normalmente (ex: !status)
     await bot.process_commands(message)
 
 @bot.command(name="status")
