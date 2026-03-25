@@ -213,6 +213,7 @@ async def sincronizar(ctx, limite: int = 999999):
 
                 vetor = await asyncio.to_thread(lambda c=msg.content: ai_model.encode(c).tolist())
 
+                # LIMPA O FUSO HORÁRIO AQUI
                 data_limpa = msg.created_at.replace(tzinfo=None)
 
                 nova_msg = Mensagem(
@@ -221,7 +222,7 @@ async def sincronizar(ctx, limite: int = 999999):
                     channel_id=msg.channel.id,
                     content=msg.content,
                     embedding=vetor,
-                    timestamp=data_limpa
+                    timestamp=data_limpa  
                 )
                 session.add(nova_msg)
                 await session.commit()
