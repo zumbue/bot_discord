@@ -211,7 +211,7 @@ async def sincronizar(ctx, limite: int = 999999):
                     await session.commit()
                     await session.refresh(usuario_db)
 
-                vetor = await asyncio.to_thread(lambda: ai_model.encode(msg.content).tolist())
+                vetor = await asyncio.to_thread(lambda c=msg.content: ai_model.encode(c).tolist())
 
                 data_limpa = msg.created_at.replace(tzinfo=None)
 
