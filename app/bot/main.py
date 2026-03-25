@@ -1,4 +1,5 @@
 import os
+import asyncio
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -55,8 +56,11 @@ async def on_message(message):
     print(f"Recebido de {usuario_nome}: {texto[:30]}...")
 
     # MEMÓRIA SEMÂNTICA
+    # CORREÇÃO BUG #1: encode() é síncrono e bloqueia o event loop.
+    # asyncio.to_thread() executa em uma thread separada, mantendo o
+    # event loop livre para processar heartbeats e outros eventos do Discord.
     try:
-        vetor_matematico = ai_model.encode(texto).tolist()
+        vetor_matematico = await asyncio.to_thread(lambda: ai_model.encode(texto).tolist())
     except Exception as e:
         print(f"❌ Erro ao passar texto na IA: {e}")
         await bot.process_commands(message)
@@ -64,6 +68,16 @@ async def on_message(message):
 
     async with AsyncSessionLocal() as session:
         try:
+            # CORREÇÃO BUG #2: verifica se a mensagem já foi salva (ex: pelo !sincronizar)
+            # para evitar UniqueViolationError silenciosa no message_id.
+            result_msg = await session.execute(
+                select(Mensagem).where(Mensagem.message_id == message.id)
+            )
+            if result_msg.scalars().first():
+                print(f"ℹ️ Mensagem {message.id} já existe no banco, ignorando.")
+                await bot.process_commands(message)
+                return
+
             result = await session.execute(
                 select(Usuario).where(Usuario.discord_id == message.author.id)
             )
@@ -205,7 +219,7 @@ async def sincronizar(ctx, limite: int = 999999):
                     await session.commit()
                     await session.refresh(usuario_db)
                 
-                vetor = ai_model.encode(msg.content).tolist()
+                vetor = await asyncio.to_thread(lambda: ai_model.encode(msg.content).tolist())
                 
                 # TEMPO ISOLADO
                 data_limpa = msg.created_at.replace(tzinfo=None)
