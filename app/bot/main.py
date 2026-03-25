@@ -1,6 +1,7 @@
 import os
 import asyncio
 import discord
+import random
 from discord.ext import commands
 from dotenv import load_dotenv
 from sqlalchemy import select, func, desc
@@ -108,6 +109,19 @@ async def on_message(message):
     finally:
         # process_commands SEMPRE roda, independente de qualquer erro acima
         await bot.process_commands(message)
+
+@bot.command(name="kill", aliases=["killall"])
+async def kill_command(ctx):
+
+    respostas = [
+        "valeu macaco",
+        "valeu vini jr",
+        "valeu primata"
+    ]
+    
+    resposta_escolhida = random.choice(respostas)
+    
+    await ctx.send(resposta_escolhida)
 
 @bot.command(name="status")
 async def status(ctx, membro: discord.Member = None):
