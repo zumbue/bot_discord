@@ -38,6 +38,58 @@ async def on_ready():
     print("=======================================")
     print("Aguardando eventos do servidor...")
 
+@bot.command(name="macaco")
+async def perguntar_ia(ctx, *, pergunta: str):
+    mensagem_espera = await ctx.send("🧠 Lendo as memórias e pensando...")
+
+    try:
+        # 1. Transforma a pergunta em um vetor matemático
+        vetor_busca = await asyncio.to_thread(lambda: ai_model.encode(pergunta).tolist())
+
+        # 2. Puxa do banco as 5 mensagens passadas mais parecidas com a pergunta
+        async with AsyncSessionLocal() as session:
+            resultados = await session.execute(
+                select(Mensagem, Usuario.username)
+                .join(Usuario)
+                .order_by(Mensagem.embedding.cosine_distance(vetor_busca))
+                .limit(5)
+            )
+            memorias = resultados.all()
+
+        # 3. Formata o contexto de forma humana para a IA ler
+        contexto = "\n".join([f"{autor} disse: {msg.content}" for msg, autor in memorias])
+
+        # 4. A Instrução Suprema (Prompt)
+        prompt = f"""Você é o bot Macaco do Discord. Você é prestativo, direto e tem um tom bem racista humorado.
+        Use o Histórico do Chat abaixo para responder à pergunta do usuário ou responda algo próximo do que poderia ser esperado.
+        Se a resposta não estiver clara no histórico, diga que não tem certeza com base nas mensagens antigas.
+
+        Histórico do Chat recente:
+        {contexto}
+
+        Pergunta do usuário: {pergunta}
+        Resposta:"""
+
+        url = "http://192.168.0.50:11434/api/generate"
+        payload = {
+            "model": "qwen2.5:0.5b",
+            "prompt": prompt,
+            "stream": False
+        }
+
+        async with aiohttp.ClientSession() as http_session:
+            async with http_session.post(url, json=payload) as response:
+                if response.status == 200:
+                    dados = await response.json()
+                    resposta_ia = dados.get("response", "Deu branco, não consegui pensar em nada.")
+                    await mensagem_espera.edit(content=resposta_ia)
+                else:
+                    await mensagem_espera.edit(content="❌ Bati na porta do Ollama, mas ele não atendeu.")
+
+    except Exception as e:
+        print(f"❌ Erro na integração da IA: {e}")
+        await mensagem_espera.edit(content="Ocorreu um erro no meu cérebro durante o raciocínio.")
+
 @bot.event
 async def on_message(message):
     # Garante que process_commands SEMPRE rode, mesmo se ocorrer erro
