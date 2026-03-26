@@ -60,22 +60,29 @@ async def perguntar_ia(ctx, *, pergunta: str):
         if not contexto.strip():
             contexto = "Ninguém falou sobre isso recentemente."
 
-        # 4. A Instrução Suprema 
-        instrucao_sistema = f"""Você é o bot Macaco do Discord. Você tem um tom sarcástico, direto e zombeteiro.
-        Responda à pergunta do usuário de forma curta, usando EXCLUSIVAMENTE o contexto abaixo.
-        Se a resposta não estiver no contexto, zombe do usuário e diga que ninguém falou sobre isso.
+# 4. A Instrução Suprema (Engenharia de Prompt para Modelos Pequenos)
+        instrucao_sistema = f"""Você é o Macaco, um bot sarcástico, debochado e zombeteiro de um servidor do Discord.
+        Siga estas regras estritamente:
+        1. NUNCA repita a pergunta do usuário.
+        2. NUNCA diga que você é uma IA, um assistente, ou peça desculpas.
+        3. Use o contexto do chat abaixo para responder. Se a resposta não estiver no contexto, NÃO invente fatos (como datas históricas ou nomes falsos). Em vez disso, zombe do usuário por perguntar algo aleatório.
+        4. Responda em apenas uma frase curta e direta.
 
         CONTEXTO DE MEMÓRIAS DO CHAT:
         {contexto}"""
 
-        url = "http://192.168.0.50:11434/api/generate"
+        url = "http://192.168.0.50:11434/api/chat" 
+        
         payload = {
             "model": "qwen2.5:0.5b",
-            "system": instrucao_sistema, 
-            "prompt": pergunta,           
+            "messages": [
+                {"role": "system", "content": instrucao_sistema},
+                {"role": "user", "content": pergunta}
+            ],
             "stream": False,
             "options": {
-                "temperature": 0.6       
+                "temperature": 0.5,
+                "top_p": 0.8
             }
         }
 
@@ -83,7 +90,8 @@ async def perguntar_ia(ctx, *, pergunta: str):
             async with http_session.post(url, json=payload) as response:
                 if response.status == 200:
                     dados = await response.json()
-                    resposta_ia = dados.get("response", "Deu branco, não consegui pensar em nada.")
+                    # A forma de ler a resposta muda na rota /chat
+                    resposta_ia = dados.get("message", {}).get("content", "Deu branco total.")
                     await mensagem_espera.edit(content=resposta_ia)
                 else:
                     await mensagem_espera.edit(content="❌ Bati na porta do Ollama, mas ele não atendeu.")
