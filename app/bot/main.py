@@ -2,15 +2,14 @@ import os
 import asyncio
 import discord
 import random
+import aiohttp
 from discord.ext import commands
 from dotenv import load_dotenv
 from sqlalchemy import select, func, desc
 
-# Imports do banco de dados
 from app.db.database import init_db, AsyncSessionLocal
 from app.db.models import Usuario, Mensagem
 
-# Import da biblioteca de IA
 from sentence_transformers import SentenceTransformer
 
 load_dotenv()
@@ -25,7 +24,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # INICIALIZANDO O MOTOR DE IA
 print("🧠 Baixando/Carregando o modelo de Inteligência Artificial...")
 print("(Isso pode demorar um pouquinho na primeira vez)")
-# O modelo 'all-MiniLM-L6-v2' gera exatamente 384 dimensões
 ai_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 @bot.event
@@ -59,8 +57,8 @@ async def perguntar_ia(ctx, *, pergunta: str):
         # 3. Formata o contexto de forma humana para a IA ler
         contexto = "\n".join([f"{autor} disse: {msg.content}" for msg, autor in memorias])
 
-        # 4. A Instrução Suprema (Prompt)
-        prompt = f"""Você é o bot Macaco do Discord. Você é prestativo, direto e tem um tom bem racista humorado.
+        # 4. A Instrução (Prompt)
+        prompt = f"""Você é o bot Macaco do Discord. Você é prestativo, direto e tem um tom bem-humorado.
         Use o Histórico do Chat abaixo para responder à pergunta do usuário ou responda algo próximo do que poderia ser esperado.
         Se a resposta não estiver clara no histórico, diga que não tem certeza com base nas mensagens antigas.
 
@@ -92,41 +90,36 @@ async def perguntar_ia(ctx, *, pergunta: str):
 
 @bot.event
 async def on_message(message):
-    # Garante que process_commands SEMPRE rode, mesmo se ocorrer erro
+    # 1. Ignora o próprio bot
+    if message.author == bot.user:
+        return
+
+    # 2. Ignora mensagens vazias (Gifs, figurinhas, anexos sem texto)
+    if not message.content or not message.content.strip():
+        return
+
+    usuario_nome = message.author.name
+    texto = message.content
+
+    print(f"📨 [on_message] Capturado de {usuario_nome}: {texto[:40]!r}")
+
+    # PASSO 1: Gera vetor em thread separada
     try:
-        # 1. Ignora o próprio bot
-        if message.author == bot.user:
-            return
+        vetor_matematico = await asyncio.to_thread(lambda: ai_model.encode(texto).tolist())
+    except Exception as e:
+        print(f"❌ [on_message] Erro no encode da IA: {e}")
+        await bot.process_commands(message) # Garante que comandos rodem mesmo se o encode falhar
+        return
 
-        # 2. Ignora mensagens vazias (Gifs, figurinhas, anexos sem texto)
-        if not message.content or not message.content.strip():
-            return
-
-        usuario_nome = message.author.name
-        texto = message.content
-
-        # LOG: confirma que o evento foi capturado (visível no terminal do servidor)
-        print(f"📨 [on_message] Capturado de {usuario_nome}: {texto[:40]!r}")
-
-        # PASSO 1: Gera vetor em thread separada — NÃO bloqueia o event loop
+    # PASSO 2: Salva no banco
+    async with AsyncSessionLocal() as session:
         try:
-            vetor_matematico = await asyncio.to_thread(lambda: ai_model.encode(texto).tolist())
-        except Exception as e:
-            print(f"❌ [on_message] Erro no encode da IA: {e}")
-            return
-
-        # PASSO 2: Salva no banco
-        async with AsyncSessionLocal() as session:
-            try:
-                # Evita duplicata (ex: mensagem já salva pelo !sincronizar)
-                result_dup = await session.execute(
-                    select(Mensagem).where(Mensagem.message_id == message.id)
-                )
-                if result_dup.scalars().first():
-                    print(f"ℹ️ [on_message] msg {message.id} já existe, pulando.")
-                    return
-
-                # Busca ou cria o usuário
+            result_dup = await session.execute(
+                select(Mensagem).where(Mensagem.message_id == message.id)
+            )
+            if result_dup.scalars().first():
+                print(f"ℹ️ [on_message] msg {message.id} já existe, pulando.")
+            else:
                 result_user = await session.execute(
                     select(Usuario).where(Usuario.discord_id == message.author.id)
                 )
@@ -141,7 +134,6 @@ async def on_message(message):
                     await session.commit()
                     await session.refresh(usuario_db)
 
-                # Salva a mensagem
                 nova_msg = Mensagem(
                     message_id=message.id,
                     user_id=usuario_db.id,
@@ -154,25 +146,24 @@ async def on_message(message):
                 await session.commit()
                 print(f"✅ [on_message] Mensagem de {usuario_nome} salva no banco.")
 
-            except Exception as e:
-                await session.rollback()
-                print(f"❌ [on_message] Erro no banco: {e}")
+        except Exception as e:
+            await session.rollback()
+            print(f"❌ [on_message] Erro no banco: {e}")
 
-    finally:
-        # process_commands SEMPRE roda, independente de qualquer erro acima
-        await bot.process_commands(message)
+    # Correção 3: Substitui o 'finally'. Processa comandos após salvar a mensagem com sucesso
+    await bot.process_commands(message)
 
 @bot.command(name="kill", aliases=["killall"])
 async def kill_command(ctx):
-
+    # Correção 4: Respostas novas focadas em piadas de TI/Games
     respostas = [
         "valeu macaco",
-        "valeu vini jr",
-        "valeu primata"
+        "primata",
+        "neandertal",
+        "hahai"
     ]
     
     resposta_escolhida = random.choice(respostas)
-    
     await ctx.send(resposta_escolhida)
 
 @bot.command(name="status")
@@ -279,7 +270,6 @@ async def sincronizar(ctx, limite: int = 999999):
 
                 vetor = await asyncio.to_thread(lambda c=msg.content: ai_model.encode(c).tolist())
 
-                # LIMPA O FUSO HORÁRIO AQUI
                 data_limpa = msg.created_at.replace(tzinfo=None)
 
                 nova_msg = Mensagem(
