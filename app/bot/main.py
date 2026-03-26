@@ -54,25 +54,29 @@ async def perguntar_ia(ctx, *, pergunta: str):
             )
             memorias = resultados.all()
 
-        # 3. Formata o contexto de forma humana para a IA ler
         contexto = "\n".join([f"{autor} disse: {msg.content}" for msg, autor in memorias])
+        
+        # Prevenção: Se o banco não achar nada sobre o assunto
+        if not contexto.strip():
+            contexto = "Ninguém falou sobre isso recentemente."
 
-        # 4. A Instrução (Prompt)
-        prompt = f"""Você é o bot Macaco do Discord. Você é prestativo, direto e tem um tom bem-humorado.
-        Use o Histórico do Chat abaixo para responder à pergunta do usuário ou responda algo próximo do que poderia ser esperado.
-        Se a resposta não estiver clara no histórico, diga que não tem certeza com base nas mensagens antigas.
+        # 4. A Instrução Suprema 
+        instrucao_sistema = f"""Você é o bot Macaco do Discord. Você tem um tom sarcástico, direto e zombeteiro.
+        Responda à pergunta do usuário de forma curta, usando EXCLUSIVAMENTE o contexto abaixo.
+        Se a resposta não estiver no contexto, zombe do usuário e diga que ninguém falou sobre isso.
 
-        Histórico do Chat recente:
-        {contexto}
-
-        Pergunta do usuário: {pergunta}
-        Resposta:"""
+        CONTEXTO DE MEMÓRIAS DO CHAT:
+        {contexto}"""
 
         url = "http://192.168.0.50:11434/api/generate"
         payload = {
             "model": "qwen2.5:0.5b",
-            "prompt": prompt,
-            "stream": False
+            "system": instrucao_sistema, 
+            "prompt": pergunta,           
+            "stream": False,
+            "options": {
+                "temperature": 0.6       
+            }
         }
 
         async with aiohttp.ClientSession() as http_session:
