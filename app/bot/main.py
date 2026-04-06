@@ -5,7 +5,8 @@ import random
 import aiohttp
 from discord.ext import commands
 from dotenv import load_dotenv
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, and_, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import init_db, AsyncSessionLocal
 from app.db.models import Usuario, Mensagem
@@ -26,6 +27,109 @@ print("🧠 Baixando/Carregando o modelo de Inteligência Artificial...")
 print("(Isso pode demorar um pouquinho na primeira vez)")
 ai_model = SentenceTransformer('all-MiniLM-L6-v2')
 
+
+def _filtro_mensagens_anteriores(referencia: Mensagem):
+    return or_(
+        Mensagem.timestamp < referencia.timestamp,
+        and_(
+            Mensagem.timestamp == referencia.timestamp,
+            Mensagem.message_id < referencia.message_id,
+        ),
+    )
+
+
+def _filtro_mensagens_posteriores(referencia: Mensagem):
+    return or_(
+        Mensagem.timestamp > referencia.timestamp,
+        and_(
+            Mensagem.timestamp == referencia.timestamp,
+            Mensagem.message_id > referencia.message_id,
+        ),
+    )
+
+
+async def buscar_janela_contexto_semantica(
+    session: AsyncSession,
+    vetor_busca: list[float],
+    *,
+    limite_ancoras: int = 3,
+    janela_antes: int = 2,
+    janela_depois: int = 2,
+):
+    resultado_ancoras = await session.execute(
+        select(Mensagem, Usuario.username)
+        .join(Usuario)
+        .order_by(Mensagem.embedding.cosine_distance(vetor_busca))
+        .limit(limite_ancoras)
+    )
+    mensagens_ancora = resultado_ancoras.all()
+
+    if not mensagens_ancora:
+        return [], set()
+
+    mensagens_por_id: dict[int, tuple[Mensagem, str]] = {}
+    ids_ancora: set[int] = set()
+
+    for mensagem_ancora, autor_ancora in mensagens_ancora:
+        mensagens_por_id[mensagem_ancora.id] = (mensagem_ancora, autor_ancora)
+        ids_ancora.add(mensagem_ancora.id)
+
+        resultado_anteriores = await session.execute(
+            select(Mensagem, Usuario.username)
+            .join(Usuario)
+            .where(Mensagem.channel_id == mensagem_ancora.channel_id)
+            .where(_filtro_mensagens_anteriores(mensagem_ancora))
+            .order_by(Mensagem.timestamp.desc(), Mensagem.message_id.desc())
+            .limit(janela_antes)
+        )
+        mensagens_anteriores = list(reversed(resultado_anteriores.all()))
+
+        resultado_posteriores = await session.execute(
+            select(Mensagem, Usuario.username)
+            .join(Usuario)
+            .where(Mensagem.channel_id == mensagem_ancora.channel_id)
+            .where(_filtro_mensagens_posteriores(mensagem_ancora))
+            .order_by(Mensagem.timestamp.asc(), Mensagem.message_id.asc())
+            .limit(janela_depois)
+        )
+        mensagens_posteriores = resultado_posteriores.all()
+
+        for mensagem, autor in [*mensagens_anteriores, *mensagens_posteriores]:
+            mensagens_por_id[mensagem.id] = (mensagem, autor)
+
+    mensagens_ordenadas = sorted(
+        mensagens_por_id.values(),
+        key=lambda item: (item[0].timestamp, item[0].message_id),
+    )
+    return mensagens_ordenadas, ids_ancora
+
+
+def formatar_memorias_em_bloco(memorias, ids_ancora: set[int]) -> str:
+    exibir_canal = len({msg.channel_id for msg, _ in memorias}) > 1
+    linhas = []
+
+    for msg, autor in memorias:
+        partes_cabecalho = [msg.timestamp.strftime("%d/%m/%Y %H:%M")]
+
+        if exibir_canal:
+            partes_cabecalho.append(f"canal {msg.channel_id}")
+
+        if msg.id in ids_ancora:
+            partes_cabecalho.append("ancora semantica")
+
+        cabecalho = " | ".join(partes_cabecalho)
+        linhas.append(f"[{cabecalho}] {autor} disse: {msg.content}")
+
+    return "\n".join(linhas)
+
+
+def truncar_texto(texto: str, limite: int = 1900) -> str:
+    if len(texto) <= limite:
+        return texto
+
+    return texto[: limite - 3].rstrip() + "..."
+
+
 @bot.event
 async def on_ready():
     print("=======================================")
@@ -36,6 +140,7 @@ async def on_ready():
     print("=======================================")
     print("Aguardando eventos do servidor...")
 
+
 @bot.command(name="macaco")
 async def perguntar_ia(ctx, *, pergunta: str):
     mensagem_espera = await ctx.send("🧠 Lendo as memórias e pensando...")
@@ -44,23 +149,22 @@ async def perguntar_ia(ctx, *, pergunta: str):
         # 1. Transforma a pergunta em um vetor matemático
         vetor_busca = await asyncio.to_thread(lambda: ai_model.encode(pergunta).tolist())
 
-        # 2. Puxa do banco as 5 mensagens passadas mais parecidas com a pergunta
+        # 2. Encontra as mensagens-ancora e recompõe a conversa em volta delas
         async with AsyncSessionLocal() as session:
-            resultados = await session.execute(
-                select(Mensagem, Usuario.username)
-                .join(Usuario)
-                .order_by(Mensagem.embedding.cosine_distance(vetor_busca))
-                .limit(5)
+            memorias, ids_ancora = await buscar_janela_contexto_semantica(
+                session,
+                vetor_busca,
+                limite_ancoras=3,
+                janela_antes=2,
+                janela_depois=2,
             )
-            memorias = resultados.all()
 
-        contexto = "\n".join([f"{autor} disse: {msg.content}" for msg, autor in memorias])
-        
+        contexto = formatar_memorias_em_bloco(memorias, ids_ancora)
+
         # Prevenção: Se o banco não achar nada sobre o assunto
         if not contexto.strip():
             contexto = "Ninguém falou sobre isso recentemente."
 
-# 4. A Instrução Suprema (Engenharia de Prompt para Modelos Pequenos)
         instrucao_sistema = f"""Você é o Macaco, um bot sarcástico, debochado e zombeteiro de um servidor do Discord.
         Siga estas regras estritamente:
         1. NUNCA repita a pergunta do usuário.
@@ -71,8 +175,8 @@ async def perguntar_ia(ctx, *, pergunta: str):
         CONTEXTO DE MEMÓRIAS DO CHAT:
         {contexto}"""
 
-        url = "http://192.168.0.50:11434/api/chat" 
-        
+        url = "http://192.168.0.50:11434/api/chat"
+
         payload = {
             "model": "qwen2.5:0.5b",
             "messages": [
@@ -90,7 +194,6 @@ async def perguntar_ia(ctx, *, pergunta: str):
             async with http_session.post(url, json=payload) as response:
                 if response.status == 200:
                     dados = await response.json()
-                    # A forma de ler a resposta muda na rota /chat
                     resposta_ia = dados.get("message", {}).get("content", "Deu branco total.")
                     await mensagem_espera.edit(content=resposta_ia)
                 else:
@@ -99,6 +202,7 @@ async def perguntar_ia(ctx, *, pergunta: str):
     except Exception as e:
         print(f"❌ Erro na integração da IA: {e}")
         await mensagem_espera.edit(content="Ocorreu um erro no meu cérebro durante o raciocínio.")
+
 
 @bot.event
 async def on_message(message):
@@ -120,7 +224,7 @@ async def on_message(message):
         vetor_matematico = await asyncio.to_thread(lambda: ai_model.encode(texto).tolist())
     except Exception as e:
         print(f"❌ [on_message] Erro no encode da IA: {e}")
-        await bot.process_commands(message) # Garante que comandos rodem mesmo se o encode falhar
+        await bot.process_commands(message)
         return
 
     # PASSO 2: Salva no banco
@@ -162,21 +266,21 @@ async def on_message(message):
             await session.rollback()
             print(f"❌ [on_message] Erro no banco: {e}")
 
-    # Correção 3: Substitui o 'finally'. Processa comandos após salvar a mensagem com sucesso
     await bot.process_commands(message)
+
 
 @bot.command(name="kill", aliases=["killall"])
 async def kill_command(ctx):
-    # Correção 4: Respostas novas focadas em piadas de TI/Games
     respostas = [
         "valeu macaco",
         "primata",
         "neandertal",
         "hahai"
     ]
-    
+
     resposta_escolhida = random.choice(respostas)
     await ctx.send(resposta_escolhida)
+
 
 @bot.command(name="status")
 async def status(ctx, membro: discord.Member = None):
@@ -217,6 +321,7 @@ async def status(ctx, membro: discord.Member = None):
             print(f"❌ Erro ao buscar status no banco: {e}")
             await ctx.send("Ocorreu um erro ao buscar os dados no banco.")
 
+
 @bot.command(name="lembrar")
 async def lembrar(ctx, *, busca: str):
     mensagem_espera = await ctx.send("🧠 Vasculhando minhas memórias semânticas...")
@@ -225,30 +330,26 @@ async def lembrar(ctx, *, busca: str):
         vetor_busca = await asyncio.to_thread(lambda: ai_model.encode(busca).tolist())
 
         async with AsyncSessionLocal() as session:
-            resultados = await session.execute(
-                select(Mensagem, Usuario.username)
-                .join(Usuario)
-                .order_by(Mensagem.embedding.cosine_distance(vetor_busca))
-                .limit(3)
+            memorias, ids_ancora = await buscar_janela_contexto_semantica(
+                session,
+                vetor_busca,
+                limite_ancoras=3,
+                janela_antes=2,
+                janela_depois=2,
             )
 
-            mensagens_encontradas = resultados.all()
-
-            if not mensagens_encontradas:
+            if not memorias:
                 await mensagem_espera.edit(content="Não encontrei nenhuma memória parecida com isso.")
                 return
 
-            resposta = f"🔍 **Resultados para:** '{busca}'\n\n"
-
-            for msg, autor_nome in mensagens_encontradas:
-                data_formatada = msg.timestamp.strftime("%d/%m/%Y %H:%M")
-                resposta += f"👤 **{autor_nome}** ({data_formatada}): {msg.content}\n"
-
-            await mensagem_espera.edit(content=resposta)
+            bloco_memorias = formatar_memorias_em_bloco(memorias, ids_ancora)
+            resposta = f"🔍 **Janela semântica para:** '{busca}'\n\n{bloco_memorias}"
+            await mensagem_espera.edit(content=truncar_texto(resposta))
 
     except Exception as e:
         print(f"❌ Erro na busca vetorial: {e}")
         await mensagem_espera.edit(content="Ocorreu um erro ao acessar o banco de memórias.")
+
 
 @bot.command(name="sincronizar")
 async def sincronizar(ctx, limite: int = 999999):
@@ -290,7 +391,7 @@ async def sincronizar(ctx, limite: int = 999999):
                     channel_id=msg.channel.id,
                     content=msg.content,
                     embedding=vetor,
-                    timestamp=data_limpa  
+                    timestamp=data_limpa
                 )
                 session.add(nova_msg)
                 await session.commit()
@@ -302,6 +403,7 @@ async def sincronizar(ctx, limite: int = 999999):
                 await session.rollback()
 
     await ctx.send(f"✅ Sincronização: **{salvas}** salvas, **{ignoradas}** ignoradas.")
+
 
 if __name__ == "__main__":
     token = os.getenv('DISCORD_TOKEN')
